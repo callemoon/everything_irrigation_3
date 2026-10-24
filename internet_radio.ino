@@ -4,7 +4,7 @@
 #include <AudioGeneratorMP3.h>
 #include <AudioOutputI2S.h>
 
-//#include "config.h"
+#include "config.h"
 //const char* ssid     = "DIN_SSID";     // Byt ut mot ditt nätverk
 //const char* password = "DITT_LOSENORD"; // Byt ut mot ditt lösenord
 
@@ -21,7 +21,9 @@ RadioStation stations[] = {
   {"3. Sveriges Radio P3",     "http://live1.sr.se/p3-mp3-96"},
   {"4. P4 Stockholm",          "http://live1.sr.se/p4sth-mp3-96"},
   {"5. P4 Uppland",            "http://live1.sr.se/p4uppl-mp3-96"},
-  {"6. P4 Gotland",            "http://live1.sr.se/p4gotl-mp3-96"}
+  {"6. P4 Gotland",            "http://live1.sr.se/p4gotl-mp3-96"},
+  {"7. SR P4 Plus",            "http://live1.sr.se/p4plus-mp3-96"},
+  {"8. SR Din Gata",            "http://live1.sr.se/dingata-mp3-96"}
 };
 
 const int totalStations = sizeof(stations) / sizeof(stations[0]);
