@@ -4,7 +4,7 @@
 #include <AudioGeneratorMP3.h>
 #include <AudioOutputI2S.h>
 
-#include "config.h"
+//#include "config.h"
 //const char* ssid     = "DIN_SSID";     // Byt ut mot ditt nätverk
 //const char* password = "DITT_LOSENORD"; // Byt ut mot ditt lösenord
 
