@@ -1,20 +1,20 @@
 #include <WiFi.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
-#include <Adafruit_SH110X.h>
+#include <Adafruit_SSD1306.h>
 #include <AudioFileSourceICYStream.h>
 #include <AudioFileSourceBuffer.h>
 #include <AudioGeneratorMP3.h>
 #include <AudioOutputI2S.h>
-#include "config.h"
+#include "wifi_password.h"
 
-// --- STIFTDEFINTIONER ---
+// --- PIN DEFINITIONS ---
 #define SDA_PIN 8
 #define SCL_PIN 7
 
 #define ENCODER_A  20  // U0RXD
-#define ENCODER_B  21  // U0txd
-#define ENCODER_SW  10  // Tryckknapp (Pinne 10)
+#define ENCODER_B  21  // U0TXD
+#define ENCODER_SW  10 // Push button
 
 #define I2S_BCLK 0
 #define I2S_LRC  1
@@ -22,49 +22,52 @@
 
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
-#define i2c_Address 0x3C 
+#define OLED_RESET    -1 
+#define SCREEN_ADDRESS 0x3C 
 
-Adafruit_SH1106G display = Adafruit_SH1106G(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 struct RadioStation {
   const char* name;
   const char* url;
+  const char* bitrate;
 };
 
 RadioStation stations[] = {
-  {"1. Sveriges Radio P1",     "http://live1.sr.se/p1-mp3-96"},
-  {"2. Sveriges Radio P2",     "http://live1.sr.se/p2-mp3-96"},
-  {"3. Sveriges Radio P3",     "http://live1.sr.se/p3-mp3-96"},
-  {"4. P4 Stockholm",          "http://live1.sr.se/p4sth-mp3-96"},
-  {"5. P4 Uppland",            "http://live1.sr.se/p4uppl-mp3-96"},
-  {"6. P4 Gotland",            "http://live1.sr.se/p4gotl-mp3-96"},
-  {"7. SR P4 Plus",            "http://live1.sr.se/p4plus-mp3-96"},
-  {"8. SR Din Gata",           "http://live1.sr.se/dingata-mp3-96"}
+  {"1. SR P1",          "http://live1.sr.se/p1-mp3-96",      "96 kbps"},
+  {"2. SR P2",          "http://live1.sr.se/p2-mp3-96",      "96 kbps"},
+  {"3. SR P3",          "http://live1.sr.se/p3-mp3-96",      "96 kbps"},
+  {"4. P4 Stockholm",   "http://live1.sr.se/p4sth-mp3-96",  "96 kbps"},
+  {"5. P4 Uppland",     "http://live1.sr.se/p4uppl-mp3-96", "96 kbps"},
+  {"6. P4 Gotland",     "http://live1.sr.se/p4gotl-mp3-96", "96 kbps"},
+  {"7. SR P4 Plus",     "http://live1.sr.se/p4plus-mp3-96", "96 kbps"},
+  {"8. SR Din Gata",    "http://live1.sr.se/dingata-mp3-96", "96 kbps"}
 };
 
 const int totalStations = sizeof(stations) / sizeof(stations[0]);
 int currentStationIndex = 0;
 
-// Encoder-variabler
+// Encoder Variables
 volatile long encoderPosition = 0;
 volatile int lastEncoded = 0;
-volatile int subSteps = 0; // Håller koll på upp till 4 mikrosteg per klick
+volatile int subSteps = 0; 
 volatile unsigned long lastInterruptTime = 0;
 long lastProcessedPosition = 0;
 
-// Meny- och volymvariabler
+// UI Modes
 enum Mode { MODE_CHANNEL, MODE_VOLUME };
 Mode currentMode = MODE_CHANNEL;
-float currentGain = 0.4; // Startvolym (0.0 till 1.0)
+float currentGain = 0.1; // Default Volume set to 10%
+
 unsigned long lastModeChangeTime = 0;
-const unsigned long MODE_TIMEOUT = 10000; // 10 sekunder innan den hoppar tillbaks
+const unsigned long MODE_TIMEOUT = 10000; 
 
-// Timer för att uppdatera Wi-Fi-signal regelbundet
+// Wi-Fi RSSI polling
 unsigned long lastRssiUpdateTime = 0;
-const unsigned long RSSI_INTERVAL = 5000; // Uppdatera var 5:e sekund
-long lastKnownRssi = 0;
+const unsigned long RSSI_INTERVAL = 3000; 
+long lastKnownRssi = -70;
 
-// Knappvariabler för säker avläsning
+// Button debouncing
 bool lastButtonState = HIGH;
 unsigned long lastButtonPress = 0;
 
@@ -74,13 +77,9 @@ AudioGeneratorMP3 *mp3 = NULL;
 AudioOutputI2S *out = NULL;
 const int BUFFER_SIZE = 1536;
 
-// Avbrottsrutin anpassad för 4 mikrosteg per fysiskt klick
 void IRAM_ATTR readEncoder() {
   unsigned long interruptTime = millis();
-  
-  if (interruptTime - lastInterruptTime < 2) {
-    return; // Snabb spärr mot kontaktstudsar
-  }
+  if (interruptTime - lastInterruptTime < 2) return;
   
   int A = digitalRead(ENCODER_A);
   int B = digitalRead(ENCODER_B);
@@ -90,7 +89,7 @@ void IRAM_ATTR readEncoder() {
 
   if (sum == 0b1101 || sum == 0b0100 || sum == 0b0010 || sum == 0b1011) {
     subSteps++;
-    if (subSteps >= 4) { // Kräver 4 pulser för ett helt steg
+    if (subSteps >= 4) {
       encoderPosition++;
       subSteps = 0;
     }
@@ -98,7 +97,7 @@ void IRAM_ATTR readEncoder() {
   }
   if (sum == 0b1110 || sum == 0b0111 || sum == 0b0001 || sum == 0b1000) {
     subSteps--;
-    if (subSteps <= -4) { // Kräver 4 pulser åt andra hållet
+    if (subSteps <= -4) {
       encoderPosition--;
       subSteps = 0;
     }
@@ -107,17 +106,25 @@ void IRAM_ATTR readEncoder() {
   lastEncoded = encoded;
 }
 
+void showBootScreen() {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  display.setCursor(24, 20);
+  display.println("ESP32 INTERNET");
+  display.setCursor(48, 34);
+  display.println("RADIO");
+
+  display.drawFastHLine(20, 48, 88, SSD1306_WHITE);
+  display.display();
+}
+
 void connectWiFi() {
+  showBootScreen();
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
   
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SH110X_WHITE);
-  display.setCursor(0, 20);
-  display.println("Ansluter till Wi-Fi...");
-  display.display();
-
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
   }
@@ -125,19 +132,9 @@ void connectWiFi() {
 }
 
 void stopAudio() {
-  if (mp3) {
-    mp3->stop();
-    delete mp3;
-    mp3 = NULL;
-  }
-  if (buff) {
-    delete buff;
-    buff = NULL;
-  }
-  if (file) {
-    delete file;
-    file = NULL;
-  }
+  if (mp3) { mp3->stop(); delete mp3; mp3 = NULL; }
+  if (buff) { delete buff; buff = NULL; }
+  if (file) { delete file; file = NULL; }
 }
 
 void startAudio() {
@@ -154,45 +151,72 @@ void startAudio() {
   }
 }
 
+int getWiFiBars(long rssi) {
+  if (rssi > 0 || rssi < -95) return 1;
+  if (rssi >= -55) return 4;
+  else if (rssi >= -68) return 3;
+  else if (rssi >= -80) return 2;
+  return 1;
+}
+
+void drawWiFiIcon(int x, int y, long rssi) {
+  int bars = getWiFiBars(rssi);
+
+  display.fillRect(x, y, 12, 10, SSD1306_BLACK);
+
+  for (int i = 0; i < bars; i++) {
+    int h = 3 + (i * 2);
+    display.fillRect(x + (i * 3), y + (9 - h), 2, h, SSD1306_WHITE);
+  }
+}
+
 void updateDisplay() {
   display.clearDisplay();
-  
   display.setTextSize(1);
-  display.setTextColor(SH110X_WHITE);
+  display.setTextColor(SSD1306_WHITE);
 
   if (currentMode == MODE_VOLUME) {
-    display.setCursor(0, 2);
-    display.print("VOLUME");
+    display.setCursor(2, 3);
+    display.print("[ VOLUME ]");
   } else {
-    display.setCursor(0, 2);
-    display.print("RADIO");
+    display.setCursor(2, 3);
+    display.print(" ESP32 RADIO");
   }
   
-  display.setCursor(76, 2);
-  display.print("WiFi:");
-  display.print(lastKnownRssi);
-
-  display.drawLine(0, 14, 128, 14, SH110X_WHITE);
+  drawWiFiIcon(104, 3, lastKnownRssi);
+  display.drawFastHLine(0, 15, 128, SSD1306_WHITE);
 
   if (currentMode == MODE_VOLUME) {
-    display.setCursor(0, 26);
-    display.print("Volym: ");
+    display.setCursor(4, 25);
+    display.print("Volume:");
+    
     int volPercent = (int)(currentGain * 100);
+    display.setCursor(90, 25);
     display.print(volPercent);
-    display.println("%");
+    display.print("%");
 
-    int barWidth = map(volPercent, 0, 100, 0, 120);
-    display.drawRect(4, 40, 120, 10, SH110X_WHITE);
-    display.fillRect(6, 42, barWidth - 4, 6, SH110X_WHITE);
-  } else {
-    display.setCursor(0, 26);
+    display.drawRect(4, 40, 120, 12, SSD1306_WHITE);
+    int barWidth = map(volPercent, 0, 100, 0, 114);
+    display.fillRect(7, 43, barWidth, 6, SSD1306_WHITE);
+  } 
+  else {
+    display.setCursor(4, 22);
+    display.print("Now Playing:");
+    
+    display.setCursor(4, 36);
     display.println(stations[currentStationIndex].name);
 
-    display.setCursor(0, 52);
+    display.drawFastHLine(0, 52, 128, SSD1306_WHITE);
+    display.setCursor(2, 55);
     if (WiFi.status() == WL_CONNECTED) {
-      display.print("Status: Spelar");
+      int volPercent = (int)(currentGain * 100);
+      display.print("V:");
+      display.print(volPercent);
+      display.print(" ");
+      display.print(lastKnownRssi);
+      display.print("dBm");
     } else {
-      display.print("Status: Ansluter...");
+      display.print("Connecting...");
     }
   }
 
@@ -210,8 +234,9 @@ void setup() {
 
   Wire.begin(SDA_PIN, SCL_PIN);
   delay(250);
-  if (!display.begin(i2c_Address, true)) { 
-    while (true); 
+  
+  if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+    while(true); 
   }
   
   display.clearDisplay();
@@ -224,6 +249,8 @@ void setup() {
   out->SetGain(currentGain);
 
   startAudio();
+  
+  // VIKTIGT: Rita ut skärmbilden direkt när allt har startat!
   updateDisplay();
 }
 
@@ -232,7 +259,10 @@ void loop() {
     lastRssiUpdateTime = millis();
     if (WiFi.status() == WL_CONNECTED) {
       long newRssi = WiFi.RSSI();
-      if (newRssi != lastKnownRssi) {
+      int oldBars = getWiFiBars(lastKnownRssi);
+      int newBars = getWiFiBars(newRssi);
+      
+      if (newBars != oldBars || newRssi != lastKnownRssi) {
         lastKnownRssi = newRssi;
         updateDisplay(); 
       }
@@ -255,7 +285,7 @@ void loop() {
   }
   lastButtonState = currentButtonState;
 
-  if (currentMode == MODE_VOLUME && (millis() - lastModeChangeTime > MODE_TIMEOUT)) {
+  if (currentMode != MODE_CHANNEL && (millis() - lastModeChangeTime > MODE_TIMEOUT)) {
     currentMode = MODE_CHANNEL;
     updateDisplay();
   }
