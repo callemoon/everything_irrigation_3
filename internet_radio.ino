@@ -6,7 +6,7 @@
 #include <AudioFileSourceBuffer.h>
 #include <AudioGeneratorMP3.h>
 #include <AudioOutputI2S.h>
-#include "wifi_password.h"
+#include "config.h"
 
 // --- STIFTDEFINTIONER ---
 #define SDA_PIN 8
@@ -48,7 +48,8 @@ int currentStationIndex = 0;
 // Encoder-variabler
 volatile long encoderPosition = 0;
 volatile int lastEncoded = 0;
-volatile int subSteps = 0; 
+volatile int subSteps = 0; // Håller koll på upp till 4 mikrosteg per klick
+volatile unsigned long lastInterruptTime = 0;
 long lastProcessedPosition = 0;
 
 // Meny- och volymvariabler
@@ -73,8 +74,14 @@ AudioGeneratorMP3 *mp3 = NULL;
 AudioOutputI2S *out = NULL;
 const int BUFFER_SIZE = 1536;
 
-// Avbrottsrutin för enkodern
+// Avbrottsrutin anpassad för 4 mikrosteg per fysiskt klick
 void IRAM_ATTR readEncoder() {
+  unsigned long interruptTime = millis();
+  
+  if (interruptTime - lastInterruptTime < 2) {
+    return; // Snabb spärr mot kontaktstudsar
+  }
+  
   int A = digitalRead(ENCODER_A);
   int B = digitalRead(ENCODER_B);
 
@@ -83,17 +90,19 @@ void IRAM_ATTR readEncoder() {
 
   if (sum == 0b1101 || sum == 0b0100 || sum == 0b0010 || sum == 0b1011) {
     subSteps++;
-    if (subSteps >= 2) {
+    if (subSteps >= 4) { // Kräver 4 pulser för ett helt steg
       encoderPosition++;
       subSteps = 0;
     }
+    lastInterruptTime = interruptTime;
   }
   if (sum == 0b1110 || sum == 0b0111 || sum == 0b0001 || sum == 0b1000) {
     subSteps--;
-    if (subSteps <= -2) {
+    if (subSteps <= -4) { // Kräver 4 pulser åt andra hållet
       encoderPosition--;
       subSteps = 0;
     }
+    lastInterruptTime = interruptTime;
   }
   lastEncoded = encoded;
 }
@@ -148,7 +157,6 @@ void startAudio() {
 void updateDisplay() {
   display.clearDisplay();
   
-  // 1. Översta raden: VOLUME eller RADIO till vänster, Wi-Fi till höger
   display.setTextSize(1);
   display.setTextColor(SH110X_WHITE);
 
@@ -164,10 +172,8 @@ void updateDisplay() {
   display.print("WiFi:");
   display.print(lastKnownRssi);
 
-  // Skiljelinje
   display.drawLine(0, 14, 128, 14, SH110X_WHITE);
 
-  // 2. Mitten: Visar antingen stationsnamn eller Volym-stapel
   if (currentMode == MODE_VOLUME) {
     display.setCursor(0, 26);
     display.print("Volym: ");
@@ -182,7 +188,6 @@ void updateDisplay() {
     display.setCursor(0, 26);
     display.println(stations[currentStationIndex].name);
 
-    // 3. Statusfält längst ner i radioläge
     display.setCursor(0, 52);
     if (WiFi.status() == WL_CONNECTED) {
       display.print("Status: Spelar");
@@ -223,7 +228,6 @@ void setup() {
 }
 
 void loop() {
-  // 0. Uppdatera Wi-Fi RSSI regelbundet (var 5:e sekund)
   if (millis() - lastRssiUpdateTime > RSSI_INTERVAL) {
     lastRssiUpdateTime = millis();
     if (WiFi.status() == WL_CONNECTED) {
@@ -235,7 +239,6 @@ void loop() {
     }
   }
 
-  // 1. Säker knappavläsning på pinne 10
   bool currentButtonState = digitalRead(ENCODER_SW);
   if (currentButtonState == LOW && lastButtonState == HIGH) {
     if (millis() - lastButtonPress > 300) { 
@@ -257,7 +260,6 @@ void loop() {
     updateDisplay();
   }
 
-  // 2. Kolla om enkodern har vridits
   noInterrupts();
   long currentPos = encoderPosition;
   interrupts();
@@ -286,7 +288,6 @@ void loop() {
     updateDisplay();
   }
 
-  // 3. Wi-Fi kontroll
   if (WiFi.status() != WL_CONNECTED) {
     stopAudio();
     connectWiFi();
@@ -295,7 +296,6 @@ void loop() {
     return;
   }
 
-  // 4. Ljudloop
   if (mp3 && mp3->isRunning()) {
     if (!mp3->loop()) {
       stopAudio();
