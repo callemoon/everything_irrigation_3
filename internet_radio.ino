@@ -6,20 +6,15 @@
 #include <AudioFileSourceBuffer.h>
 #include <AudioGeneratorMP3.h>
 #include <AudioOutputI2S.h>
-
-//#include "config.h"
-
-// --- WI-FI-UPPGIFTER ---
-//const char* ssid     = "DIN_SSID";       // Byt ut mot ditt nätverk
-//const char* password = "DITT_LOSENORD";   // Byt ut mot ditt lösenord
+#include "wifi_password.h"
 
 // --- STIFTDEFINTIONER ---
 #define SDA_PIN 8
 #define SCL_PIN 7
 
-#define ENCODER_A  20  // U0RXD (Ingen Serial får användas här!)
-#define ENCODER_B  21  // U0txd (Ingen Serial får användas här!)
-#define ENCODER_SW  4   // Tryckknapp
+#define ENCODER_A  20  // U0RXD
+#define ENCODER_B  21  // U0txd
+#define ENCODER_SW  10  // Tryckknapp (Pinne 10)
 
 #define I2S_BCLK 0
 #define I2S_LRC  1
@@ -50,9 +45,27 @@ RadioStation stations[] = {
 const int totalStations = sizeof(stations) / sizeof(stations[0]);
 int currentStationIndex = 0;
 
+// Encoder-variabler
 volatile long encoderPosition = 0;
 volatile int lastEncoded = 0;
+volatile int subSteps = 0; 
 long lastProcessedPosition = 0;
+
+// Meny- och volymvariabler
+enum Mode { MODE_CHANNEL, MODE_VOLUME };
+Mode currentMode = MODE_CHANNEL;
+float currentGain = 0.4; // Startvolym (0.0 till 1.0)
+unsigned long lastModeChangeTime = 0;
+const unsigned long MODE_TIMEOUT = 10000; // 10 sekunder innan den hoppar tillbaks
+
+// Timer för att uppdatera Wi-Fi-signal regelbundet
+unsigned long lastRssiUpdateTime = 0;
+const unsigned long RSSI_INTERVAL = 5000; // Uppdatera var 5:e sekund
+long lastKnownRssi = 0;
+
+// Knappvariabler för säker avläsning
+bool lastButtonState = HIGH;
+unsigned long lastButtonPress = 0;
 
 AudioFileSourceICYStream *file = NULL;
 AudioFileSourceBuffer *buff = NULL;
@@ -60,6 +73,7 @@ AudioGeneratorMP3 *mp3 = NULL;
 AudioOutputI2S *out = NULL;
 const int BUFFER_SIZE = 1536;
 
+// Avbrottsrutin för enkodern
 void IRAM_ATTR readEncoder() {
   int A = digitalRead(ENCODER_A);
   int B = digitalRead(ENCODER_B);
@@ -68,10 +82,18 @@ void IRAM_ATTR readEncoder() {
   int sum = (lastEncoded << 2) | encoded;
 
   if (sum == 0b1101 || sum == 0b0100 || sum == 0b0010 || sum == 0b1011) {
-    encoderPosition++;
+    subSteps++;
+    if (subSteps >= 2) {
+      encoderPosition++;
+      subSteps = 0;
+    }
   }
   if (sum == 0b1110 || sum == 0b0111 || sum == 0b0001 || sum == 0b1000) {
-    encoderPosition--;
+    subSteps--;
+    if (subSteps <= -2) {
+      encoderPosition--;
+      subSteps = 0;
+    }
   }
   lastEncoded = encoded;
 }
@@ -80,7 +102,6 @@ void connectWiFi() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
   
-  // Visa på skärmen att vi ansluter till Wi-Fi
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SH110X_WHITE);
@@ -91,6 +112,7 @@ void connectWiFi() {
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
   }
+  lastKnownRssi = WiFi.RSSI();
 }
 
 void stopAudio() {
@@ -119,40 +141,60 @@ void startAudio() {
   
   if (mp3 && buff && file) {
     mp3->begin(buff, out);
+    out->SetGain(currentGain);
   }
 }
 
 void updateDisplay() {
   display.clearDisplay();
   
+  // 1. Översta raden: VOLUME eller RADIO till vänster, Wi-Fi till höger
   display.setTextSize(1);
   display.setTextColor(SH110X_WHITE);
-  display.setCursor(0, 0);
-  display.println("ESP32-C3 Internet Radio");
-  display.drawLine(0, 10, 128, 10, SH110X_WHITE);
 
-  display.setCursor(0, 18);
-  display.print("Kanal ");
-  display.print(currentStationIndex + 1);
-  display.print("/");
-  display.println(totalStations);
-
-  display.setCursor(0, 32);
-  display.println(stations[currentStationIndex].name);
-
-  display.setCursor(0, 52);
-  if (WiFi.status() == WL_CONNECTED) {
-    display.print("Status: Spelar");
+  if (currentMode == MODE_VOLUME) {
+    display.setCursor(0, 2);
+    display.print("VOLUME");
   } else {
-    display.print("Status: Ansluter...");
+    display.setCursor(0, 2);
+    display.print("RADIO");
+  }
+  
+  display.setCursor(76, 2);
+  display.print("WiFi:");
+  display.print(lastKnownRssi);
+
+  // Skiljelinje
+  display.drawLine(0, 14, 128, 14, SH110X_WHITE);
+
+  // 2. Mitten: Visar antingen stationsnamn eller Volym-stapel
+  if (currentMode == MODE_VOLUME) {
+    display.setCursor(0, 26);
+    display.print("Volym: ");
+    int volPercent = (int)(currentGain * 100);
+    display.print(volPercent);
+    display.println("%");
+
+    int barWidth = map(volPercent, 0, 100, 0, 120);
+    display.drawRect(4, 40, 120, 10, SH110X_WHITE);
+    display.fillRect(6, 42, barWidth - 4, 6, SH110X_WHITE);
+  } else {
+    display.setCursor(0, 26);
+    display.println(stations[currentStationIndex].name);
+
+    // 3. Statusfält längst ner i radioläge
+    display.setCursor(0, 52);
+    if (WiFi.status() == WL_CONNECTED) {
+      display.print("Status: Spelar");
+    } else {
+      display.print("Status: Ansluter...");
+    }
   }
 
   display.display();
 }
 
 void setup() {
-  // OBS: Ingen Serial.begin() här eftersom pinnar 20 och 21 används av enkodern!
-
   pinMode(ENCODER_A, INPUT_PULLUP);
   pinMode(ENCODER_B, INPUT_PULLUP);
   pinMode(ENCODER_SW, INPUT_PULLUP);
@@ -174,14 +216,48 @@ void setup() {
 
   out = new AudioOutputI2S();
   out->SetPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
-  out->SetGain(0.4);
+  out->SetGain(currentGain);
 
   startAudio();
   updateDisplay();
 }
 
 void loop() {
-  // 1. Kolla om enkodern har vridits
+  // 0. Uppdatera Wi-Fi RSSI regelbundet (var 5:e sekund)
+  if (millis() - lastRssiUpdateTime > RSSI_INTERVAL) {
+    lastRssiUpdateTime = millis();
+    if (WiFi.status() == WL_CONNECTED) {
+      long newRssi = WiFi.RSSI();
+      if (newRssi != lastKnownRssi) {
+        lastKnownRssi = newRssi;
+        updateDisplay(); 
+      }
+    }
+  }
+
+  // 1. Säker knappavläsning på pinne 10
+  bool currentButtonState = digitalRead(ENCODER_SW);
+  if (currentButtonState == LOW && lastButtonState == HIGH) {
+    if (millis() - lastButtonPress > 300) { 
+      lastButtonPress = millis();
+      lastModeChangeTime = millis();
+      
+      if (currentMode == MODE_CHANNEL) {
+        currentMode = MODE_VOLUME;
+      } else {
+        currentMode = MODE_CHANNEL;
+      }
+      updateDisplay();
+    }
+  }
+  lastButtonState = currentButtonState;
+
+  if (currentMode == MODE_VOLUME && (millis() - lastModeChangeTime > MODE_TIMEOUT)) {
+    currentMode = MODE_CHANNEL;
+    updateDisplay();
+  }
+
+  // 2. Kolla om enkodern har vridits
   noInterrupts();
   long currentPos = encoderPosition;
   interrupts();
@@ -189,17 +265,28 @@ void loop() {
   if (currentPos != lastProcessedPosition) {
     int diff = currentPos - lastProcessedPosition;
     lastProcessedPosition = currentPos;
+    lastModeChangeTime = millis(); 
 
-    currentStationIndex = (currentStationIndex + (diff > 0 ? 1 : -1)) % totalStations;
-    if (currentStationIndex < 0) {
-      currentStationIndex = totalStations - 1;
+    if (currentMode == MODE_CHANNEL) {
+      currentStationIndex = (currentStationIndex + (diff > 0 ? 1 : -1)) % totalStations;
+      if (currentStationIndex < 0) {
+        currentStationIndex = totalStations - 1;
+      }
+      startAudio();
+    } 
+    else if (currentMode == MODE_VOLUME) {
+      currentGain += (diff > 0 ? 0.05 : -0.05);
+      if (currentGain > 1.0) currentGain = 1.0;
+      if (currentGain < 0.0) currentGain = 0.0;
+      
+      if (out) {
+        out->SetGain(currentGain);
+      }
     }
-
-    startAudio();
     updateDisplay();
   }
 
-  // 2. Wi-Fi kontroll
+  // 3. Wi-Fi kontroll
   if (WiFi.status() != WL_CONNECTED) {
     stopAudio();
     connectWiFi();
@@ -208,7 +295,7 @@ void loop() {
     return;
   }
 
-  // 3. Ljudloop
+  // 4. Ljudloop
   if (mp3 && mp3->isRunning()) {
     if (!mp3->loop()) {
       stopAudio();
@@ -220,6 +307,5 @@ void loop() {
     startAudio();
   }
 
-  // Låt systemet andas så Watchdog inte utlöses
   vTaskDelay(1); 
 }
