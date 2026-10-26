@@ -6,7 +6,7 @@
 #include <AudioFileSourceBuffer.h>
 #include <AudioGeneratorMP3.h>
 #include <AudioOutputI2S.h>
-#include "wifi_password.h"
+#include "config.h"
 
 // --- PIN DEFINITIONS ---
 #define SDA_PIN 8
@@ -16,9 +16,9 @@
 #define ENCODER_B  21  // U0TXD
 #define ENCODER_SW  10 // Push button
 
-#define I2S_BCLK 0
-#define I2S_LRC  1
-#define I2S_DOUT 3
+#define I2S_DOUT 0
+#define I2S_BCLK 1
+#define I2S_LRC  2
 
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
