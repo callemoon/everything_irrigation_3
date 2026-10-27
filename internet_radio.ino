@@ -1,7 +1,8 @@
-#include <WiFi.h>
-#include <Wire.h>
+#include <Arduino.h>
+#include <SPI.h>
 #include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
+#include <Adafruit_ST7789.h>
+#include <WiFi.h>
 #include <AudioFileSourceICYStream.h>
 #include <AudioFileSourceBuffer.h>
 #include <AudioGeneratorMP3.h>
@@ -9,23 +10,33 @@
 #include "config.h"
 
 // --- PIN DEFINITIONS ---
-#define SDA_PIN 8
-#define SCL_PIN 7
+#define ENCODER_A    20  // U0RXD
+#define ENCODER_B    21  // U0TXD
+#define ENCODER_SW   10  // Push button
 
-#define ENCODER_A  20  // U0RXD
-#define ENCODER_B  21  // U0TXD
-#define ENCODER_SW  10 // Push button
+#define I2S_DOUT 8
+#define I2S_BCLK 6
+#define I2S_LRC  7
 
-#define I2S_DOUT 0
-#define I2S_BCLK 1
-#define I2S_LRC  2
+// SPI Display Pins
+#define TFT_SCLK 0
+#define TFT_MOSI 1
+#define TFT_RST  2
+#define TFT_DC   3
+#define TFT_CS   4
+#define PIN_LED  5
 
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 64
-#define OLED_RESET    -1 
-#define SCREEN_ADDRESS 0x3C 
+// Färgdefinitioner (RGB565)
+#define COLOR_BG      0x0000  // Svart bakgrund för ren look
+#define COLOR_CYAN    0x07FF  // Stark cyan
+#define COLOR_ORANGE  0xFCE0  // Neon orange
+#define COLOR_GREEN   0x07E0  // Stark grön
+#define COLOR_WHITE   0xFFFF  // Vit
+#define COLOR_GRAY    0x7BEF  // Grå text
+#define COLOR_DIM_GRAY 0x4208 // Mörkare grå för avdelare
 
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+SPIClass spiDisplay(FSPI);
+Adafruit_ST7789 tft = Adafruit_ST7789(&spiDisplay, TFT_CS, TFT_DC, TFT_RST);
 
 struct RadioStation {
   const char* name;
@@ -34,14 +45,14 @@ struct RadioStation {
 };
 
 RadioStation stations[] = {
-  {"1. SR P1",          "http://live1.sr.se/p1-mp3-96",      "96 kbps"},
-  {"2. SR P2",          "http://live1.sr.se/p2-mp3-96",      "96 kbps"},
-  {"3. SR P3",          "http://live1.sr.se/p3-mp3-96",      "96 kbps"},
+  {"1. SR P1",         "http://live1.sr.se/p1-mp3-96",     "96 kbps"},
+  {"2. SR P2",         "http://live1.sr.se/p2-mp3-96",     "96 kbps"},
+  {"3. SR P3",         "http://live1.sr.se/p3-mp3-96",     "96 kbps"},
   {"4. P4 Stockholm",   "http://live1.sr.se/p4sth-mp3-96",  "96 kbps"},
-  {"5. P4 Uppland",     "http://live1.sr.se/p4uppl-mp3-96", "96 kbps"},
-  {"6. P4 Gotland",     "http://live1.sr.se/p4gotl-mp3-96", "96 kbps"},
-  {"7. SR P4 Plus",     "http://live1.sr.se/p4plus-mp3-96", "96 kbps"},
-  {"8. SR Din Gata",    "http://live1.sr.se/dingata-mp3-96", "96 kbps"}
+  {"5. P4 Uppland",    "http://live1.sr.se/p4uppl-mp3-96", "96 kbps"},
+  {"6. P4 Gotland",    "http://live1.sr.se/p4gotl-mp3-96", "96 kbps"},
+  {"7. SR P4 Plus",    "http://live1.sr.se/p4plus-mp3-96", "96 kbps"},
+  {"8. SR Din Gata",   "http://live1.sr.se/dingata-mp3-96", "96 kbps"}
 };
 
 const int totalStations = sizeof(stations) / sizeof(stations[0]);
@@ -57,7 +68,7 @@ long lastProcessedPosition = 0;
 // UI Modes
 enum Mode { MODE_CHANNEL, MODE_VOLUME };
 Mode currentMode = MODE_CHANNEL;
-float currentGain = 0.1; // Default Volume set to 10%
+float currentGain = 0.1; // Standardvolym 10%
 
 unsigned long lastModeChangeTime = 0;
 const unsigned long MODE_TIMEOUT = 10000; 
@@ -107,17 +118,15 @@ void IRAM_ATTR readEncoder() {
 }
 
 void showBootScreen() {
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-
-  display.setCursor(24, 20);
-  display.println("ESP32 INTERNET");
-  display.setCursor(48, 34);
-  display.println("RADIO");
-
-  display.drawFastHLine(20, 48, 88, SSD1306_WHITE);
-  display.display();
+  tft.fillScreen(COLOR_BG);
+  tft.setTextSize(2);
+  tft.setTextColor(COLOR_CYAN);
+  tft.setCursor(40, 50);
+  tft.println("ESP32 INTERNET RADIO");
+  tft.setTextSize(1);
+  tft.setTextColor(COLOR_ORANGE);
+  tft.setCursor(90, 85);
+  tft.println("Ansluter till WiFi...");
 }
 
 void connectWiFi() {
@@ -151,79 +160,116 @@ void startAudio() {
   }
 }
 
-int getWiFiBars(long rssi) {
-  if (rssi > 0 || rssi < -95) return 1;
-  if (rssi >= -55) return 4;
-  else if (rssi >= -68) return 3;
-  else if (rssi >= -80) return 2;
-  return 1;
-}
-
-void drawWiFiIcon(int x, int y, long rssi) {
-  int bars = getWiFiBars(rssi);
-
-  display.fillRect(x, y, 12, 10, SSD1306_BLACK);
-
-  for (int i = 0; i < bars; i++) {
-    int h = 3 + (i * 2);
-    display.fillRect(x + (i * 3), y + (9 - h), 2, h, SSD1306_WHITE);
-  }
-}
-
+// Ritar upp hela gränssnittet (endast vid uppstart och lägesbyte)
 void updateDisplay() {
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
+  tft.fillScreen(COLOR_BG);
 
+  // 1. Minimalistisk header (visar läge)
+  tft.setTextSize(1);
   if (currentMode == MODE_VOLUME) {
-    display.setCursor(2, 3);
-    display.print("[ VOLUME ]");
+    tft.setTextColor(COLOR_ORANGE);
+    tft.setCursor(10, 10);
+    tft.print("> JUSTERAR VOLYM <");
   } else {
-    display.setCursor(2, 3);
-    display.print(" ESP32 RADIO");
+    tft.setTextColor(COLOR_GRAY);
+    tft.setCursor(10, 10);
+    tft.print("INTERNET RADIO");
   }
+
+  // Tunn avdelningslinje under header
+  tft.drawFastHLine(10, 25, 300, COLOR_DIM_GRAY);
+
+  // 2. Aktuell station (Stort och rent utan ramar)
+  tft.setTextColor(COLOR_GRAY);
+  tft.setTextSize(1);
+  tft.setCursor(10, 42);
+  tft.print("SPELAS NU:");
+
+  tft.setTextColor(COLOR_WHITE);
+  tft.setTextSize(2);
+  tft.setCursor(10, 62);
+  tft.print(stations[currentStationIndex].name);
+
+  // Bitrate till höger
+  tft.setTextSize(1);
+  tft.setTextColor(COLOR_ORANGE);
+  tft.setCursor(240, 42);
+  tft.print(stations[currentStationIndex].bitrate);
+
+  // Tunn avdelningslinje i mitten
+  tft.drawFastHLine(10, 95, 300, COLOR_DIM_GRAY);
+
+  // 3. Botten: Volymstapel & WiFi
+  tft.setTextColor(COLOR_GRAY);
+  tft.setTextSize(1);
+  tft.setCursor(10, 115);
+  tft.print("Volym");
+
+  // Volymstapel
+  tft.drawRect(55, 114, 130, 12, COLOR_DIM_GRAY);
+  int volPercent = (int)(currentGain * 100);
+  int barWidth = map(volPercent, 0, 100, 0, 126);
+  tft.fillRect(57, 116, barWidth, 8, COLOR_GREEN);
   
-  drawWiFiIcon(104, 3, lastKnownRssi);
-  display.drawFastHLine(0, 15, 128, SSD1306_WHITE);
+  tft.setCursor(195, 115);
+  tft.setTextColor(COLOR_WHITE);
+  tft.print(volPercent);
+  tft.print("%");
 
-  if (currentMode == MODE_VOLUME) {
-    display.setCursor(4, 25);
-    display.print("Volume:");
-    
-    int volPercent = (int)(currentGain * 100);
-    display.setCursor(90, 25);
-    display.print(volPercent);
-    display.print("%");
+  // RSSI till höger
+  tft.setTextColor(COLOR_CYAN);
+  tft.setCursor(235, 115);
+  tft.print("RSSI:");
+  tft.print(lastKnownRssi);
 
-    display.drawRect(4, 40, 120, 12, SSD1306_WHITE);
-    int barWidth = map(volPercent, 0, 100, 0, 114);
-    display.fillRect(7, 43, barWidth, 6, SSD1306_WHITE);
-  } 
-  else {
-    display.setCursor(4, 22);
-    display.print("Now Playing:");
-    
-    display.setCursor(4, 36);
-    display.println(stations[currentStationIndex].name);
+  // 4. Statusrad längst ner
+  tft.setTextColor(COLOR_DIM_GRAY);
+  tft.setCursor(10, 150);
+  tft.print(WiFi.status() == WL_CONNECTED ? "Status: Ansluten" : "Status: Ansluter...");
+}
 
-    display.drawFastHLine(0, 52, 128, SSD1306_WHITE);
-    display.setCursor(2, 55);
-    if (WiFi.status() == WL_CONNECTED) {
-      int volPercent = (int)(currentGain * 100);
-      display.print("V:");
-      display.print(volPercent);
-      display.print(" ");
-      display.print(lastKnownRssi);
-      display.print("dBm");
-    } else {
-      display.print("Connecting...");
-    }
-  }
+// Flimmerfri uppdatering ENDAST för stationsbyte
+void updateStationDisplay() {
+  // Rensa endast ytan där stationsnamnet och bitraten finns
+  tft.fillRect(10, 40, 300, 45, COLOR_BG);
 
-  display.display();
+  tft.setTextColor(COLOR_GRAY);
+  tft.setTextSize(1);
+  tft.setCursor(10, 42);
+  tft.print("SPELAS NU:");
+
+  tft.setTextColor(COLOR_WHITE);
+  tft.setTextSize(2);
+  tft.setCursor(10, 62);
+  tft.print(stations[currentStationIndex].name);
+
+  tft.setTextSize(1);
+  tft.setTextColor(COLOR_ORANGE);
+  tft.setCursor(240, 42);
+  tft.print(stations[currentStationIndex].bitrate);
+}
+
+// Flimmerfri uppdatering ENDAST för volymändring
+void updateVolumeDisplay() {
+  int volPercent = (int)(currentGain * 100);
+  
+  // Rensa stapelns insida och procent-texten
+  tft.fillRect(57, 116, 126, 8, COLOR_BG); 
+  int barWidth = map(volPercent, 0, 100, 0, 126);
+  tft.fillRect(57, 116, barWidth, 8, COLOR_GREEN);
+
+  tft.fillRect(195, 115, 35, 10, COLOR_BG);
+  tft.setCursor(195, 115);
+  tft.setTextSize(1);
+  tft.setTextColor(COLOR_WHITE);
+  tft.print(volPercent);
+  tft.print("%");
 }
 
 void setup() {
+  pinMode(PIN_LED, OUTPUT);
+  digitalWrite(PIN_LED, HIGH);
+
   pinMode(ENCODER_A, INPUT_PULLUP);
   pinMode(ENCODER_B, INPUT_PULLUP);
   pinMode(ENCODER_SW, INPUT_PULLUP);
@@ -232,15 +278,10 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(ENCODER_A), readEncoder, CHANGE);
   attachInterrupt(digitalPinToInterrupt(ENCODER_B), readEncoder, CHANGE);
 
-  Wire.begin(SDA_PIN, SCL_PIN);
-  delay(250);
-  
-  if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
-    while(true); 
-  }
-  
-  display.clearDisplay();
-  display.display();
+  spiDisplay.begin(TFT_SCLK, -1, TFT_MOSI, TFT_CS);
+  tft.init(170, 320);
+  tft.setSPISpeed(40000000); 
+  tft.setRotation(3); 
 
   connectWiFi();
 
@@ -249,8 +290,6 @@ void setup() {
   out->SetGain(currentGain);
 
   startAudio();
-  
-  // VIKTIGT: Rita ut skärmbilden direkt när allt har startat!
   updateDisplay();
 }
 
@@ -258,14 +297,7 @@ void loop() {
   if (millis() - lastRssiUpdateTime > RSSI_INTERVAL) {
     lastRssiUpdateTime = millis();
     if (WiFi.status() == WL_CONNECTED) {
-      long newRssi = WiFi.RSSI();
-      int oldBars = getWiFiBars(lastKnownRssi);
-      int newBars = getWiFiBars(newRssi);
-      
-      if (newBars != oldBars || newRssi != lastKnownRssi) {
-        lastKnownRssi = newRssi;
-        updateDisplay(); 
-      }
+      lastKnownRssi = WiFi.RSSI();
     }
   }
 
@@ -280,7 +312,7 @@ void loop() {
       } else {
         currentMode = MODE_CHANNEL;
       }
-      updateDisplay();
+      updateDisplay(); // Ritar om hela skärmen vid lägesbyte för att visa rätt rubrik
     }
   }
   lastButtonState = currentButtonState;
@@ -305,6 +337,7 @@ void loop() {
         currentStationIndex = totalStations - 1;
       }
       startAudio();
+      updateStationDisplay(); // Flimmerfritt byte av station!
     } 
     else if (currentMode == MODE_VOLUME) {
       currentGain += (diff > 0 ? 0.05 : -0.05);
@@ -314,8 +347,8 @@ void loop() {
       if (out) {
         out->SetGain(currentGain);
       }
+      updateVolumeDisplay(); // Flimmerfri volymändring!
     }
-    updateDisplay();
   }
 
   if (WiFi.status() != WL_CONNECTED) {
