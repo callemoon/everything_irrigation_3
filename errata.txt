@@ -1,0 +1,2 @@
+Ideal didodes does not work
+Distance measurment does not work due to GPIO9 used for echo signal which is also boot pin
