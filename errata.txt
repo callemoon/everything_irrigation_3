@@ -1,2 +1,14 @@
+Irrigation 3
+
 Ideal didodes does not work
 Distance measurment does not work due to GPIO9 used for echo signal which is also boot pin
+
+ESP32
+
+GND for crystal is connected using thermal reliefs which makes the crystal sensitive to touching
+
+SPI display carrier 3
+
+Encoder push button is connected to non existing pin on esp32 board
+
+
